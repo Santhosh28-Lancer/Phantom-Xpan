@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">X200T Camera Explorer</string>
+    <string name="app_title">X200T CAMERA LAB</string>
+    <string name="app_subtitle">Milestone 1 · Capability Explorer</string>
+    <string name="scan_capabilities">SCAN CAMERA CAPABILITIES</string>
+    <string name="waiting_for_permission">Waiting for camera permission…</string>
+    <string name="no_cameras_reported">No cameras were reported by Android Camera2.</string>
+    <string name="camera_scan_failed">Camera scan failed: %1$d
+%2$s</string>
+    <string name="no_additional_details">No additional details</string>
+    <string name="camera_permission_required">Camera permission is required to inspect camera capabilities.</string>
+    <string name="camera_characteristics_failed">Could not read camera %1$s characteristics.
+%2$s: %3$s</string>
+    <string name="camera_permission_denied">Camera permission denied. Enable it in Android Settings to use the explorer.</string>
+</resources>
