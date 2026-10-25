@@ -21,7 +21,7 @@ android {
         applicationId = "com.santhosh.x200tcamera"
         minSdk = 23
         targetSdk = 35
-        versionCode = 11
-        versionName = "1.3.1"
+        versionCode = 22
+        versionName = "1.4.3"
     }
 }

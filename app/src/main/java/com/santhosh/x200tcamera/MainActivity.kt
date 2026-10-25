@@ -87,6 +87,7 @@ class MainActivity : Activity() {
     private enum class ColorLook(val title: String, val subtitle: String) {
         ORIGINAL("Original", "Natural camera color"),
         HASSELBLAD("Hasselblad Natural", "Soft contrast, restrained saturation, warm highlights"),
+        ZEISS("ZEISS Natural", "Natural micro-contrast, neutral color, cool-clean shadows"),
         VINTAGE("Vintage", "Faded warmth and lifted blacks"),
         RETRO("Retro 70s", "Amber warmth, muted greens, film fade"),
         CLASSIC("Classic Chrome", "Muted color with stronger tonal contrast"),
@@ -104,6 +105,9 @@ class MainActivity : Activity() {
     private var gridEnabled = false
     private var torchEnabled = false
     private var captureFlashMode = 0 // 0=off, 1=auto, 2=on
+    private var volumeShutterEnabled = true
+    private var stabilizationEnabled = true
+    private var highQualityJpegEnabled = true
     private var selectedMegapixels = 0 // 0=max available
     private var saveRelativePath = "Pictures/PhantomXpan"
     private lateinit var manualSensorCheck: CheckBox
@@ -146,6 +150,24 @@ class MainActivity : Activity() {
     private val permissionRequestCode = 501
     private val maxReportedSizes = 12
 
+    @Suppress("DEPRECATION")
+    private fun applyImmersiveMode() {
+        // Hide status + navigation bars while keeping transient swipe-to-reveal behavior.
+        window.decorView.systemUiVisibility = (
+                View.SYSTEM_UI_FLAG_FULLSCREEN
+                        or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                        or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                        or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                )
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) applyImmersiveMode()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Phantom Xpan is a dedicated landscape-only camera.
@@ -155,6 +177,9 @@ class MainActivity : Activity() {
         selectedMegapixels = prefs.getInt("megapixels", 0)
         saveRelativePath = prefs.getString("save_path", "Pictures/PhantomXpan") ?: "Pictures/PhantomXpan"
         captureFlashMode = prefs.getInt("flash_mode", 0).coerceIn(0, 2)
+        volumeShutterEnabled = prefs.getBoolean("volume_shutter", true)
+        stabilizationEnabled = prefs.getBoolean("stabilization", true)
+        highQualityJpegEnabled = prefs.getBoolean("high_quality_jpeg", true)
         selectedColorLook = runCatching { ColorLook.valueOf(prefs.getString("color_look", "ORIGINAL") ?: "ORIGINAL") }.getOrDefault(ColorLook.ORIGINAL)
         cameraManager = getSystemService(CAMERA_SERVICE) as CameraManager
         buildUi()
@@ -174,7 +199,7 @@ class MainActivity : Activity() {
     private fun buildUi() {
         window.statusBarColor = Color.rgb(5, 7, 9)
         window.navigationBarColor = Color.rgb(5, 7, 9)
-        window.decorView.systemUiVisibility = 0
+        applyImmersiveMode()
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -182,15 +207,17 @@ class MainActivity : Activity() {
             setPadding(dp(12), dp(6), dp(12), dp(8))
         }
 
-        val header = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+        val header = FrameLayout(this)
+        val titleBlock = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
         }
-        val titleBlock = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val title = TextView(this).apply {
             text = "PHANTOM XPAN"
-            textSize = 18f
-            letterSpacing = 0.12f
+            textSize = 21f
+            letterSpacing = 0.14f
+            gravity = Gravity.CENTER
+            textAlignment = View.TEXT_ALIGNMENT_CENTER
             setTextColor(Color.rgb(242, 220, 168))
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
         }
@@ -198,11 +225,13 @@ class MainActivity : Activity() {
             text = "65:24 PANORAMIC CAMERA"
             textSize = 9f
             letterSpacing = 0.16f
+            gravity = Gravity.CENTER
+            textAlignment = View.TEXT_ALIGNMENT_CENTER
             setTextColor(Color.rgb(160, 167, 175))
         }
-        titleBlock.addView(title)
-        titleBlock.addView(subtitle)
-        header.addView(titleBlock, LinearLayout.LayoutParams(0, -2, 1f))
+        titleBlock.addView(title, LinearLayout.LayoutParams(-2, -2))
+        titleBlock.addView(subtitle, LinearLayout.LayoutParams(-2, -2))
+        header.addView(titleBlock, FrameLayout.LayoutParams(-1, -2, Gravity.CENTER))
         val livePill = TextView(this).apply {
             text = "● LIVE"
             textSize = 10f
@@ -211,7 +240,7 @@ class MainActivity : Activity() {
             setPadding(dp(9), dp(6), dp(9), dp(6))
             background = roundedBackground(Color.rgb(36, 20, 20), Color.rgb(115, 42, 36), 16)
         }
-        header.addView(livePill)
+        header.addView(livePill, FrameLayout.LayoutParams(-2, -2, Gravity.END or Gravity.CENTER_VERTICAL))
         root.addView(header, LinearLayout.LayoutParams(-1, dp(48)))
 
         val cameraBar = LinearLayout(this).apply {
@@ -240,6 +269,111 @@ class MainActivity : Activity() {
         previewFrame.addView(preview, FrameLayout.LayoutParams(-1, -1))
         hudOverlay = HudOverlay(this)
         previewFrame.addView(hudOverlay, FrameLayout.LayoutParams(-1, -1))
+
+        // Compact zoom scope inside the viewfinder. Tap the scope to expand lens/zoom choices.
+        val zoomOverlay = LinearLayout(this).apply {
+            tag = "xpan_zoom_overlay"
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(3), dp(3), dp(3), dp(3))
+            background = roundedBackground(Color.argb(218, 8, 10, 13), Color.rgb(70, 76, 84), 16)
+            elevation = dp(14).toFloat()
+        }
+        val zoomScopeButton = Button(this).apply {
+            text = "🔍 1.0×"
+            textSize = 11f
+            isAllCaps = false
+            setTextColor(Color.rgb(242, 220, 168))
+            background = ColorDrawable(Color.TRANSPARENT)
+            minHeight = dp(30)
+            minWidth = dp(82)
+            setPadding(dp(5), 0, dp(5), 0)
+            contentDescription = "Tap magnifier to expand zoom choices"
+        }
+        val zoomExpanded = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+        }
+        val zoomValueLabel = TextView(this).apply {
+            text = "ZOOM  ${String.format(Locale.US, "%.1f", zoomRatio)}×"
+            textSize = 10f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+        }
+        zoomSeek = SeekBar(this).apply {
+            max = 100
+            progress = 0
+            contentDescription = "Viewfinder zoom slider"
+        }
+        fun getZoomRange(): Pair<Float, Float> {
+            val id = activeCameraId ?: return 1f to 1f
+            return runCatching {
+                val c = cameraManager.getCameraCharacteristics(id)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    val range = c.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+                    (range?.lower ?: 1f) to (range?.upper ?: c.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1f)
+                } else 1f to (c.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1f)
+            }.getOrDefault(1f to 1f)
+        }
+        fun syncZoomUi() {
+            val (minZoom, maxZoom) = getZoomRange()
+            zoomValueLabel.text = "ZOOM  ${String.format(Locale.US, "%.1f", zoomRatio)}×"
+            zoomSeek.progress = if (maxZoom > minZoom) {
+                ((zoomRatio - minZoom) / (maxZoom - minZoom) * 100f).toInt().coerceIn(0, 100)
+            } else 0
+            zoomScopeButton.text = "🔍 ${String.format(Locale.US, "%.1f", zoomRatio)}×"
+        }
+        zoomSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (!fromUser) return
+                val (minZoom, maxZoom) = getZoomRange()
+                zoomRatio = minZoom + (maxZoom - minZoom) * progress / 100f
+                zoomValueLabel.text = "ZOOM  ${String.format(Locale.US, "%.1f", zoomRatio)}×"
+                applyZoom()
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+            override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+        })
+        zoomScopeButton.setOnClickListener {
+            zoomExpanded.visibility = if (zoomExpanded.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+            zoomScopeButton.text = "🔍 ${String.format(Locale.US, "%.1f", zoomRatio)}×"
+            zoomOverlay.requestLayout()
+        }
+        // Premium expanded zoom wheel: a curved scale with a clear selected value, not a stack
+        // of tiny buttons and a conventional slider. The compact magnifier remains the toggle.
+        val zoomWheel = ZoomWheelView(this, { getZoomRange() }, { ratio ->
+            val (minZoom, maxZoom) = getZoomRange()
+            zoomRatio = ratio.coerceIn(minZoom, maxZoom)
+            zoomValueLabel.text = String.format(Locale.US, "%.1f×  ·  ZOOM", zoomRatio)
+            applyZoom()
+            syncZoomUi()
+        })
+        zoomExpanded.addView(zoomValueLabel, LinearLayout.LayoutParams(-1, dp(24)))
+        zoomExpanded.addView(zoomWheel, LinearLayout.LayoutParams(-1, dp(150)))
+        zoomSeek.visibility = View.GONE
+        zoomOverlay.addView(zoomScopeButton, LinearLayout.LayoutParams(-1, dp(30)))
+        zoomOverlay.addView(zoomExpanded, LinearLayout.LayoutParams(dp(320), -2))
+        previewFrame.addView(zoomOverlay, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+            bottomMargin = dp(10)
+        })
+
+        // Keep flash reachable in the landscape Xpan layout. The legacy camera bar is hidden
+        // in this layout, so the flash control must be attached directly to the viewfinder.
+        flashButton.apply {
+            textSize = 14f
+            contentDescription = "Flash: tap to cycle Off, Auto, On; long-press for torch"
+            minWidth = dp(42)
+            minimumWidth = dp(42)
+            minHeight = dp(34)
+            minimumHeight = dp(34)
+            setPadding(dp(5), 0, dp(5), 0)
+        }
+        previewFrame.addView(flashButton, FrameLayout.LayoutParams(dp(46), dp(34), Gravity.TOP or Gravity.END).apply {
+            topMargin = dp(8)
+            rightMargin = dp(8)
+        })
+
         preview.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> configurePreviewTransform() }
         previewFrame.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> configurePreviewTransform() }
         // HudOverlay is drawn above TextureView, so touch events must be handled on the
@@ -249,6 +383,7 @@ class MainActivity : Activity() {
             when (event.action) {
                 android.view.MotionEvent.ACTION_UP -> {
                     if (event.x >= 0f && event.y >= 0f && event.x < preview.width && event.y < preview.height) {
+                        hudOverlay.performClick()
                         focusAtPreviewPoint(event.x, event.y)
                     }
                     true
@@ -264,7 +399,7 @@ class MainActivity : Activity() {
         })
 
         zoomLabel = TextView(this).apply { text = "1×"; visibility = View.GONE }
-        zoomSeek = SeekBar(this).apply { visibility = View.GONE; max = 100; progress = 0 }
+        // Reuse the viewfinder zoom slider initialized above; do not reassign it.
         val lensRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -278,7 +413,8 @@ class MainActivity : Activity() {
         lensRow.addView(lensButton("1×", 24f, 1f), LinearLayout.LayoutParams(0, dp(38), 1f).apply { marginEnd = dp(4) })
         lensRow.addView(lensButton("2×", 48f, 2f), LinearLayout.LayoutParams(0, dp(38), 1f).apply { marginEnd = dp(4) })
         lensRow.addView(lensButton("5×", 120f, 5f), LinearLayout.LayoutParams(0, dp(38), 1f))
-        root.addView(lensRow, LinearLayout.LayoutParams(-1, dp(42)))
+        // XPAN uses the in-viewfinder zoom scope above; do not add a second lens rail.
+        lensRow.visibility = View.GONE
 
         controlsToggle = hudButton("⌄  CONTROLS", "Show advanced controls").apply {
             visibility = View.GONE
@@ -444,6 +580,47 @@ class MainActivity : Activity() {
         lockRow.addView(awbLockCheck, LinearLayout.LayoutParams(0, dp(32), 1f))
         advancedControls.addView(lockRow, LinearLayout.LayoutParams(-1, dp(32)))
 
+        // XPAN Pro controls are attached directly to the viewfinder. The legacy controlsToggle
+        // is hidden in XPAN mode, so this is the visible entry point.
+        lateinit var proControlsButton: Button
+        lateinit var proPanelScroll: ScrollView
+        proControlsButton = hudButton("PRO ⚙", "Open Pro camera controls").apply {
+            tag = "xpan_pro_button"
+            visibility = View.VISIBLE
+            textSize = 10f
+            setPadding(dp(8), 0, dp(8), 0)
+            setOnClickListener {
+                val opening = proPanelScroll.visibility != View.VISIBLE
+                proPanelScroll.visibility = if (opening) View.VISIBLE else View.GONE
+                advancedControls.visibility = if (opening) View.VISIBLE else View.GONE
+                text = if (opening) "✕ CLOSE" else "PRO ⚙"
+                if (opening) proPanelScroll.bringToFront()
+                proControlsButton.bringToFront()
+            }
+        }
+        proPanelScroll = ScrollView(this).apply {
+            tag = "xpan_pro_panel"
+            visibility = View.GONE
+            isFillViewport = false
+            overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+            background = ColorDrawable(Color.TRANSPARENT)
+            elevation = dp(18).toFloat()
+            addView(advancedControls, FrameLayout.LayoutParams(-1, -2))
+        }
+        proControlsButton.elevation = dp(22).toFloat()
+        // Fill the remaining viewfinder area and scroll the controls instead of clipping
+        // the lower rows at a fixed 236dp height.
+        previewFrame.addView(proPanelScroll, FrameLayout.LayoutParams(-1, -1, Gravity.TOP).apply {
+            topMargin = dp(44)
+            leftMargin = dp(8)
+            rightMargin = dp(8)
+            bottomMargin = dp(8)
+        })
+        previewFrame.addView(proControlsButton, FrameLayout.LayoutParams(dp(84), dp(30), Gravity.TOP or Gravity.START).apply {
+            leftMargin = dp(8)
+            topMargin = dp(8)
+        })
+
         // iPhone-inspired capture dock: gallery thumbnail, circular white shutter, camera switch.
         val bottomControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -557,7 +734,7 @@ class MainActivity : Activity() {
             val centerColumn = LinearLayout(this).apply { tag = "xpan_center_column"; orientation = LinearLayout.VERTICAL }
             header.tag = "xpan_header"
             cameraBar.tag = "xpan_camera_bar"
-            centerColumn.addView(header, LinearLayout.LayoutParams(-1, dp(34)))
+            centerColumn.addView(header, LinearLayout.LayoutParams(-1, dp(42)))
             centerColumn.addView(cameraBar, LinearLayout.LayoutParams(-1, dp(38)))
             centerColumn.addView(previewFrame, LinearLayout.LayoutParams(-1, 0, 1f).apply {
                 topMargin = dp(2); bottomMargin = dp(2)
@@ -587,50 +764,9 @@ class MainActivity : Activity() {
             bottomControls.removeAllViews()
             shutterSpace.layoutParams = LinearLayout.LayoutParams(-1, dp(74)).apply { gravity = Gravity.CENTER_HORIZONTAL }
 
-            val utilityRow = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER
-            }
-            // Keep secondary controls out of the permanent rail. The menu is a popup overlay,
-            // so opening it never changes the preview's measured size or transform.
-            val cameraMenuButton = hudButton("☰", "Camera tools menu").apply {
-                textSize = 18f
-                contentDescription = "Open camera tools"
-            }
-            cameraMenuButton.setOnClickListener { anchor ->
-                val popup = android.widget.PopupMenu(this@MainActivity, anchor)
-                val photo = popup.menu.addSubMenu("Photo settings")
-                photo.add(0, 101, 0, "Resolution: ${if (selectedMegapixels <= 0) "Maximum" else "$selectedMegapixels MP"}")
-                photo.add(0, 102, 1, "Storage: $saveRelativePath")
-                photo.add(0, 103, 2, "Flash: ${when (captureFlashMode) { 1 -> "Auto"; 2 -> "On"; else -> "Off" }}")
-                photo.add(0, 104, 3, if (gridEnabled) "Grid: On" else "Grid: Off")
-                popup.menu.add(0, 3, 5, "Color filter: ${selectedColorLook.title}")
-                popup.menu.add(0, 4, 6, "Camera settings")
-                popup.setOnMenuItemClickListener { item ->
-                    when (item.itemId) {
-                        101 -> showPhotoResolutionPicker()
-                        102 -> showSaveLocationChoices()
-                        103 -> flashButton.performClick()
-                        104 -> gridButton.performClick()
-                        3 -> showColorLookPicker()
-                        4 -> showPhantomSettings()
-                    }
-                    true
-                }
-                popup.show()
-            }
-            utilityRow.addView(cameraMenuButton, LinearLayout.LayoutParams(dp(38), dp(34)))
-
-            val lensTitle = TextView(this).apply {
-                text = "LENS"
-                textSize = 9f
-                letterSpacing = 0.18f
-                gravity = Gravity.CENTER
-                setTextColor(Color.LTGRAY)
-            }
-            rightRail.addView(lensTitle, LinearLayout.LayoutParams(-1, dp(13)))
+            // Settings already lives on the left rail. Keep the right rail free of duplicate
+            // settings/menu and lens labels; zoom is handled by the compact in-viewfinder scope.
             rightRail.addView(lensRow, LinearLayout.LayoutParams(-1, dp(34)))
-            rightRail.addView(utilityRow, LinearLayout.LayoutParams(-1, dp(38)).apply { topMargin = dp(3) })
             rightRail.addView(View(this), LinearLayout.LayoutParams(1, 0, 1f))
             rightRail.addView(shutterSpace, LinearLayout.LayoutParams(-1, dp(78)))
             rightRail.addView(View(this), LinearLayout.LayoutParams(1, 0, 1f))
@@ -653,7 +789,6 @@ class MainActivity : Activity() {
         val overlayRoot = FrameLayout(this)
         overlayRoot.addView(root, FrameLayout.LayoutParams(-1, -1))
         (controlsToggle.parent as? android.view.ViewGroup)?.removeView(controlsToggle)
-        (advancedControls.parent as? android.view.ViewGroup)?.removeView(advancedControls)
         controlsToggle.visibility = View.GONE
         advancedControls.visibility = View.GONE
         controlsToggle.isClickable = true
@@ -661,9 +796,7 @@ class MainActivity : Activity() {
         controlsToggle.visibility = if (appPhotoMode == AppPhotoMode.PRO) View.VISIBLE else View.GONE
         controlsToggle.bringToFront()
         advancedControls.elevation = dp(12).toFloat()
-        overlayRoot.addView(advancedControls, FrameLayout.LayoutParams(-1, -2, Gravity.TOP).apply {
-            topMargin = dp(76); leftMargin = dp(8); rightMargin = dp(8)
-        })
+        // Pro controls are hosted inside the viewfinder scroll overlay.
         advancedControls.elevation = dp(20).toFloat()
         controlsToggle.elevation = dp(24).toFloat()
         setContentView(overlayRoot)
@@ -755,6 +888,68 @@ class MainActivity : Activity() {
         return Triple(text, seek, row)
     }
 
+    private inner class ZoomWheelView(
+        context: Context,
+        private val rangeProvider: () -> Pair<Float, Float>,
+        private val onZoomChanged: (Float) -> Unit
+    ) : View(context) {
+        private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        private var lastRatio = 1f
+        private val gold = Color.rgb(225, 190, 100)
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val w = width.toFloat(); val h = height.toFloat()
+            if (w <= 0f || h <= 0f) return
+            val (minZ, maxZ) = rangeProvider()
+            val safeMax = maxZ.coerceAtLeast(minZ + 0.01f)
+            val cx = w / 2f
+            val cy = h * 1.02f
+            val radius = w * 0.43f
+            p.style = Paint.Style.STROKE
+            p.strokeWidth = dp(2).toFloat()
+            p.color = Color.rgb(72, 77, 82)
+            canvas.drawArc(cx-radius, cy-radius, cx+radius, cy+radius, 205f, 130f, false, p)
+            val current = lastRatio.coerceIn(minZ, safeMax)
+            val fraction = ((kotlin.math.ln(current) - kotlin.math.ln(minZ)) / (kotlin.math.ln(safeMax) - kotlin.math.ln(minZ))).coerceIn(0f, 1f)
+            for (i in 0..60) {
+                val f = i / 60f
+                val angle = Math.toRadians((205f + 130f * f).toDouble())
+                val major = i % 5 == 0
+                val r1 = radius - if (major) dp(15) else dp(8)
+                val r2 = radius - dp(1)
+                val x1 = cx + kotlin.math.cos(angle).toFloat() * r1
+                val y1 = cy + kotlin.math.sin(angle).toFloat() * r1
+                val x2 = cx + kotlin.math.cos(angle).toFloat() * r2
+                val y2 = cy + kotlin.math.sin(angle).toFloat() * r2
+                p.color = if (kotlin.math.abs(f - fraction) < 0.018f) gold else if (major) Color.rgb(225, 225, 222) else Color.rgb(135, 140, 143)
+                p.strokeWidth = (if (major) dp(2) else dp(1)).toFloat()
+                canvas.drawLine(x1, y1, x2, y2, p)
+            }
+            val pointerAngle = Math.toRadians((205f + 130f * fraction).toDouble())
+            p.style = Paint.Style.FILL; p.color = gold
+            val px = cx + kotlin.math.cos(pointerAngle).toFloat() * (radius - dp(23))
+            val py = cy + kotlin.math.sin(pointerAngle).toFloat() * (radius - dp(23))
+            canvas.drawCircle(px, py, dp(4).toFloat(), p)
+            p.textAlign = Paint.Align.CENTER; p.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            p.color = gold; p.textSize = dp(21).toFloat()
+            canvas.drawText(String.format(Locale.US, "%.1f×", current), cx, h * 0.58f, p)
+            p.color = Color.rgb(165, 169, 173); p.textSize = dp(10).toFloat(); p.typeface = Typeface.DEFAULT
+            canvas.drawText("PINCH OR DRAG TO ZOOM", cx, h * 0.75f, p)
+        }
+        override fun onTouchEvent(event: android.view.MotionEvent): Boolean {
+            if (event.action == android.view.MotionEvent.ACTION_DOWN || event.action == android.view.MotionEvent.ACTION_MOVE) {
+                val (minZ, maxZ) = rangeProvider()
+                val fraction = (event.x / width.coerceAtLeast(1)).coerceIn(0f, 1f)
+                val ratio = kotlin.math.exp(kotlin.math.ln(minZ.coerceAtLeast(0.01f)) + fraction * (kotlin.math.ln(maxZ.coerceAtLeast(minZ + 0.01f)) - kotlin.math.ln(minZ.coerceAtLeast(0.01f))))
+                lastRatio = ratio
+                onZoomChanged(ratio)
+                invalidate()
+                return true
+            }
+            return event.action == android.view.MotionEvent.ACTION_UP
+        }
+    }
+
     private inner class HudOverlay(context: Context) : View(context) {
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
         var showGrid: Boolean = false
@@ -762,6 +957,10 @@ class MainActivity : Activity() {
         var focusPointX: Float? = null
         var focusPointY: Float? = null
         var focusPointTime: Long = 0L
+        override fun performClick(): Boolean {
+            super.performClick()
+            return true
+        }
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
             val w = width.toFloat()
@@ -873,17 +1072,168 @@ class MainActivity : Activity() {
     }
 
     private fun showPhantomSettings() {
-        val options = arrayOf("Megapixel selection", "Save location", "Done")
+        val options = arrayOf(
+            "Photo resolution: ${if (selectedMegapixels <= 0) "Maximum available" else "$selectedMegapixels MP target"}",
+            "Save location: $saveRelativePath",
+            "Flash: ${when (captureFlashMode) { 1 -> "Auto"; 2 -> "On"; else -> "Off" }}",
+            "Color look: ${selectedColorLook.title}",
+            "Grid overlay: ${if (gridEnabled) "On" else "Off"}",
+            "Volume-key shutter: ${if (volumeShutterEnabled) "On" else "Off"}",
+            "Still-image stabilization: ${if (stabilizationEnabled) "On" else "Off"}",
+            "JPEG quality: ${if (highQualityJpegEnabled) "Maximum" else "Standard"}",
+            "Camera / sensor diagnostics",
+            "Output bit depth information"
+        )
         AlertDialog.Builder(this)
-            .setTitle("PHANTOM XPAN SETTINGS")
-            .setItems(options) { dialog, which ->
+            .setTitle("PHANTOM XPAN · ALL SETTINGS")
+            .setItems(options) { _, which ->
                 when (which) {
                     0 -> showMegapixelChoices()
                     1 -> showSaveLocationChoices()
-                    else -> dialog.dismiss()
+                    2 -> flashButton.performClick()
+                    3 -> showColorLookPicker()
+                    4 -> gridButton.performClick()
+                    5 -> {
+                        volumeShutterEnabled = !volumeShutterEnabled
+                        getSharedPreferences("phantom_xpan_settings", MODE_PRIVATE).edit().putBoolean("volume_shutter", volumeShutterEnabled).apply()
+                        Toast.makeText(this, "Volume-key shutter ${if (volumeShutterEnabled) "enabled" else "disabled"}", Toast.LENGTH_SHORT).show()
+                        showPhantomSettings()
+                    }
+                    6 -> {
+                        stabilizationEnabled = !stabilizationEnabled
+                        getSharedPreferences("phantom_xpan_settings", MODE_PRIVATE).edit().putBoolean("stabilization", stabilizationEnabled).apply()
+                        applyStabilizationToPreview()
+                        Toast.makeText(this, "Still stabilization ${if (stabilizationEnabled) "enabled" else "disabled"} (when supported)", Toast.LENGTH_SHORT).show()
+                        showPhantomSettings()
+                    }
+                    7 -> {
+                        highQualityJpegEnabled = !highQualityJpegEnabled
+                        getSharedPreferences("phantom_xpan_settings", MODE_PRIVATE).edit().putBoolean("high_quality_jpeg", highQualityJpegEnabled).apply()
+                        Toast.makeText(this, "JPEG output quality: ${if (highQualityJpegEnabled) "Maximum" else "Standard"}", Toast.LENGTH_SHORT).show()
+                        showPhantomSettings()
+                    }
+                    8 -> showCameraZoomDiagnostics()
+                    9 -> showOutputBitDepthInfo()
                 }
             }
             .setNegativeButton("CLOSE", null)
+            .show()
+    }
+
+    private fun showOutputBitDepthInfo() {
+        val id = activeCameraId
+        val message = if (id == null) {
+            "No active camera is selected."
+        } else runCatching {
+            val c = cameraManager.getCameraCharacteristics(id)
+            val caps = c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
+            val raw = caps.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW)
+            val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            val jpeg = map?.getOutputSizes(ImageFormat.JPEG)?.maxByOrNull { it.width.toLong() * it.height }
+            "Standard JPEG is 8-bit per color channel. Your phone's 10-bit ISP processing does not automatically mean a third-party Camera2 app can save a 10-bit JPEG.\n\n" +
+                "Largest Camera2 JPEG: ${jpeg?.let { "${it.width} × ${it.height}" } ?: "not reported"}\n" +
+                "RAW_SENSOR capability: ${if (raw) "reported" else "not reported"}\n\n" +
+                (if (raw) "A future RAW/DNG capture path can preserve higher-bit-depth sensor samples where the sensor and HAL expose them. It requires a separate RAW capture pipeline; 16-bit and 32-bit RGB JPEG output is not a valid camera format." else "This camera ID does not report RAW_SENSOR capability. Check other rear camera IDs in diagnostics.")
+        }.getOrElse { "Could not read output capabilities: ${it.message}" }
+        AlertDialog.Builder(this).setTitle("OUTPUT BIT DEPTH")
+            .setMessage(message).setPositiveButton("OK", null).show()
+    }
+
+    private fun applyStabilizationToPreview() {
+        val builder = previewRequestBuilder ?: return
+        val camera = cameraDevice ?: return
+        val handler = backgroundHandler ?: return
+        try {
+            val chars = cameraManager.getCameraCharacteristics(camera.id)
+            val supported = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION) ?: intArrayOf()
+            val mode = if (stabilizationEnabled && supported.contains(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)) CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON else CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF
+            builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, mode)
+            captureSession?.setRepeatingRequest(builder.build(), null, handler)
+        } catch (e: Exception) { Log.w("PhantomXpan", "Optical stabilization setting unavailable", e) }
+    }
+
+    override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent?): Boolean {
+        if (volumeShutterEnabled && event?.repeatCount == 0 &&
+            (keyCode == android.view.KeyEvent.KEYCODE_VOLUME_UP || keyCode == android.view.KeyEvent.KEYCODE_VOLUME_DOWN)) {
+            if (::captureButton.isInitialized && captureButton.isEnabled) captureButton.performClick()
+            return true
+        }
+        // Android does not allow ordinary apps to intercept the Power button as a shutter.
+        return super.onKeyDown(keyCode, event)
+    }
+
+
+    private fun showCameraZoomDiagnostics() {
+        val reportText = StringBuilder()
+        reportText.append("PHANTOM XPAN · CAMERA DIAGNOSTICS\n\n")
+        reportText.append("Active camera: ${activeCameraId ?: "none"}\n")
+        reportText.append("Requested zoom: ${String.format(Locale.US, "%.2f", zoomRatio)}×\n\n")
+        try {
+            val ids = cameraManager.cameraIdList
+            ids.forEach { id ->
+                val c = cameraManager.getCameraCharacteristics(id)
+                val facing = when (c.get(CameraCharacteristics.LENS_FACING)) {
+                    CameraCharacteristics.LENS_FACING_BACK -> "Back"
+                    CameraCharacteristics.LENS_FACING_FRONT -> "Front"
+                    CameraCharacteristics.LENS_FACING_EXTERNAL -> "External"
+                    else -> "Unknown"
+                }
+                val focal = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.joinToString { "%.2f mm".format(Locale.US, it) } ?: "not reported"
+                val sensor = c.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+                val pixel = c.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)
+                val maxZoom = c.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1f
+                val ratioRange = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) c.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE) else null
+                val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                val jpeg = map?.getOutputSizes(ImageFormat.JPEG)?.maxByOrNull { it.width.toLong() * it.height }
+                val cfa = c.get(CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT)
+                val whiteLevel = c.get(CameraCharacteristics.SENSOR_INFO_WHITE_LEVEL)
+                val blackPattern = c.get(CameraCharacteristics.SENSOR_BLACK_LEVEL_PATTERN)
+                val awbModes = c.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES) ?: intArrayOf()
+                // Camera2 exposes aberration-correction modes as a characteristic; color-correction
+                // FAST/HIGH_QUALITY are request modes, not a CameraCharacteristics key.
+                val aberrationCorrectionModes = c.get(CameraCharacteristics.COLOR_CORRECTION_AVAILABLE_ABERRATION_MODES) ?: intArrayOf()
+                val stabilizationModes = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION) ?: intArrayOf()
+                reportText.append("CAMERA $id · $facing\n")
+                reportText.append("  Focal length(s): $focal\n")
+                reportText.append("  Sensor: ${sensor?.width ?: "?"} × ${sensor?.height ?: "?"} mm\n")
+                reportText.append("  Pixel array: ${pixel?.width ?: "?"} × ${pixel?.height ?: "?"}\n")
+                reportText.append("  Max digital zoom: ${"%.1f".format(Locale.US, maxZoom)}×\n")
+                reportText.append("  Zoom ratio range: ${ratioRange?.let { "${it.lower}×–${it.upper}×" } ?: "not exposed"}\n")
+                reportText.append("  Largest JPEG stream: ${jpeg?.let { "${it.width}×${it.height}" } ?: "not reported"}\n")
+                reportText.append("  Sensor color filter arrangement: ${cfa ?: "not reported"}\n")
+                reportText.append("  Sensor white level: ${whiteLevel ?: "not reported"}; black-level pattern: ${blackPattern ?: "not reported"}\n")
+                reportText.append("  AWB modes: ${awbModes.joinToString()}; aberration-correction modes: ${aberrationCorrectionModes.joinToString()}\n")
+                reportText.append("  Optical stabilization modes: ${stabilizationModes.joinToString()}\n")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    val physicalIds: Set<String> = c.physicalCameraIds
+                    if (physicalIds.isNotEmpty()) {
+                        reportText.append("  Logical camera physical IDs: ${physicalIds.joinToString()}\n")
+                    }
+                }
+                reportText.append("\n")
+            }
+            reportText.append("NOTE: Camera2-reported zoom is not proof of optical lens switching. The system camera HAL may switch lenses at some zoom boundaries; if it does not, magnification is digital and detail can fall.\n")
+        } catch (e: Exception) {
+            reportText.append("\nDiagnostics error: ${e.message}")
+        }
+        val scroll = ScrollView(this).apply {
+            addView(TextView(this@MainActivity).apply {
+                text = reportText.toString()
+                setTextColor(Color.WHITE)
+                textSize = 13f
+                setPadding(dp(16), dp(12), dp(16), dp(12))
+                typeface = android.graphics.Typeface.MONOSPACE
+            })
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Camera / Zoom Diagnostics")
+            .setView(scroll)
+            .setPositiveButton("Copy report") { _, _ ->
+                val clipboard = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Phantom Xpan camera diagnostics", reportText.toString()))
+                Toast.makeText(this, "Diagnostics copied", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Close", null)
             .show()
     }
 
@@ -988,7 +1338,12 @@ class MainActivity : Activity() {
             try { choosePreviewSize(id) } catch (_: Exception) { return }
         }
 
-        val rotation = display?.rotation ?: Surface.ROTATION_0
+        val rotation = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            display?.rotation ?: Surface.ROTATION_0
+        } else {
+            @Suppress("DEPRECATION")
+            windowManager.defaultDisplay.rotation
+        }
         val viewWidth = preview.width.toFloat()
         val viewHeight = preview.height.toFloat()
         val centerX = viewWidth / 2f
@@ -1077,6 +1432,15 @@ class MainActivity : Activity() {
             window.decorView.findViewWithTag<View>("xpan_camera_bar")?.visibility = View.GONE
             window.decorView.findViewWithTag<View>("xpan_gallery_button")?.visibility = View.VISIBLE
             window.decorView.findViewWithTag<View>("xpan_switch_button")?.visibility = View.GONE
+            // Keep the new controls explicitly visible in XPAN mode and above the HUD overlay.
+            window.decorView.findViewWithTag<View>("xpan_zoom_overlay")?.apply {
+                visibility = View.VISIBLE
+                bringToFront()
+            }
+            window.decorView.findViewWithTag<View>("xpan_pro_button")?.apply {
+                visibility = View.VISIBLE
+                bringToFront()
+            }
             window.decorView.findViewWithTag<View>("xpan_right_scroll")?.layoutParams?.let { lp ->
                 lp.width = dp(142)
                 window.decorView.findViewWithTag<View>("xpan_right_scroll")?.layoutParams = lp
@@ -1241,7 +1605,11 @@ class MainActivity : Activity() {
     private fun selectLens(targetEquivalentMm: Float, fallbackZoom: Float) {
         // targetEquivalentMm is retained for future physical-lens matching. For now, use
         // the requested zoom ratio so this works on devices that expose only one camera ID.
-        zoomRatio = fallbackZoom.coerceAtLeast(1.0f)
+        val chars = activeCameraId?.let { runCatching { cameraManager.getCameraCharacteristics(it) }.getOrNull() }
+        val zoomRange = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) chars?.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE) else null
+        val minZoom = zoomRange?.lower ?: 1.0f
+        val maxZoom = zoomRange?.upper ?: chars?.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1f
+        zoomRatio = fallbackZoom.coerceIn(minZoom, maxZoom.coerceAtLeast(minZoom))
         if (::zoomLabel.isInitialized) {
             zoomLabel.text = when (fallbackZoom) {
                 1.0f -> "1×"
@@ -1251,8 +1619,17 @@ class MainActivity : Activity() {
             }
         }
         if (::zoomSeek.isInitialized) {
-            zoomSeek.progress = (((zoomRatio - 1.0f) / 9.0f) * zoomSeek.max)
-                .toInt().coerceIn(0, zoomSeek.max)
+            val maxZoom = activeCameraId?.let { id ->
+                runCatching {
+                    val c = cameraManager.getCameraCharacteristics(id)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) c.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)?.upper
+                        ?: c.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1f
+                    else c.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1f
+                }.getOrDefault(1f)
+            } ?: 1f
+            zoomSeek.progress = if (maxZoom > 1f) {
+                (kotlin.math.ln(zoomRatio) / kotlin.math.ln(maxZoom) * zoomSeek.max).toInt().coerceIn(0, zoomSeek.max)
+            } else 0
         }
         applyZoom()
     }
@@ -1267,7 +1644,8 @@ class MainActivity : Activity() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 val range = chars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
                 val maxRatio = range?.upper ?: maxDigital
-                val ratio = zoomRatio.coerceIn(1.0f, maxRatio)
+                val minRatio = range?.lower ?: 1.0f
+                val ratio = zoomRatio.coerceIn(minRatio, maxRatio)
                 // Logical multi-camera HALs can switch physical sensors at lens boundaries.
                 // CONTROL_ZOOM_RATIO preserves that path; a hand-built crop region can bypass it.
                 builder.set(CaptureRequest.CONTROL_ZOOM_RATIO, ratio)
@@ -1934,15 +2312,29 @@ class MainActivity : Activity() {
                         } else {
                             set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
                         }
-                        set(CaptureRequest.JPEG_QUALITY, 100.toByte())
+                        set(CaptureRequest.JPEG_QUALITY, (if (highQualityJpegEnabled) 100 else 95).toByte())
                         set(CaptureRequest.CONTROL_AF_MODE, afMode)
-                        previewBuilder?.get(CaptureRequest.CONTROL_AWB_MODE)?.let { set(CaptureRequest.CONTROL_AWB_MODE, it) }
+                        val supportedAwb = chars.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES) ?: intArrayOf()
+                        set(CaptureRequest.CONTROL_AWB_MODE, if (supportedAwb.contains(CaptureRequest.CONTROL_AWB_MODE_AUTO)) CaptureRequest.CONTROL_AWB_MODE_AUTO else (previewBuilder?.get(CaptureRequest.CONTROL_AWB_MODE) ?: CaptureRequest.CONTROL_AWB_MODE_AUTO))
+                        // COLOR_CORRECTION_MODE_FAST is a standard request mode. There is no
+                        // COLOR_CORRECTION_AVAILABLE_MODES CameraCharacteristics key.
+                        set(CaptureRequest.COLOR_CORRECTION_MODE, CaptureRequest.COLOR_CORRECTION_MODE_FAST)
+                        val optStab = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION) ?: intArrayOf()
+                        set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, if (stabilizationEnabled && optStab.contains(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)) CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON else CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF)
                         previewBuilder?.get(CaptureRequest.CONTROL_AE_LOCK)?.let { set(CaptureRequest.CONTROL_AE_LOCK, it) }
                         previewBuilder?.get(CaptureRequest.CONTROL_AWB_LOCK)?.let { set(CaptureRequest.CONTROL_AWB_LOCK, it) }
                         previewBuilder?.get(CaptureRequest.LENS_FOCUS_DISTANCE)?.let { set(CaptureRequest.LENS_FOCUS_DISTANCE, it) }
                         previewBuilder?.get(CaptureRequest.SENSOR_SENSITIVITY)?.let { set(CaptureRequest.SENSOR_SENSITIVITY, it) }
                         previewBuilder?.get(CaptureRequest.SENSOR_EXPOSURE_TIME)?.let { set(CaptureRequest.SENSOR_EXPOSURE_TIME, it) }
-                        previewBuilder?.get(CaptureRequest.SCALER_CROP_REGION)?.let { set(CaptureRequest.SCALER_CROP_REGION, it) }
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                            previewBuilder?.get(CaptureRequest.CONTROL_ZOOM_RATIO)?.let {
+                                set(CaptureRequest.CONTROL_ZOOM_RATIO, it)
+                            }
+                        } else {
+                            previewBuilder?.get(CaptureRequest.SCALER_CROP_REGION)?.let {
+                                set(CaptureRequest.SCALER_CROP_REGION, it)
+                            }
+                        }
                         previewBuilder?.get(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION)?.let { set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, it) }
                         // Match the still image orientation to the actual sensor/display orientation.
                         // X PAN then crops to 65:24 in landscape or 24:65 in portrait.
@@ -1975,6 +2367,9 @@ class MainActivity : Activity() {
                         if (chars.get(CameraCharacteristics.TONEMAP_AVAILABLE_TONE_MAP_MODES)?.contains(CaptureRequest.TONEMAP_MODE_HIGH_QUALITY) == true) {
                             set(CaptureRequest.TONEMAP_MODE, CaptureRequest.TONEMAP_MODE_HIGH_QUALITY)
                         }
+                        // JPEG output is already display-referred/sRGB-like. Applying an extra
+                        // gamma 2.2 curve to this encoded JPEG would double-gamma and damage tones.
+                        // Let the camera HAL's advertised high-quality tonemap handle linear sensor data.
                     }
                     session.capture(stillRequest.build(), object : CameraCaptureSession.CaptureCallback() {
                         override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: android.hardware.camera2.TotalCaptureResult) {
@@ -2108,6 +2503,7 @@ class MainActivity : Activity() {
         filterButton.text = when (selectedColorLook) {
             ColorLook.ORIGINAL -> "◐"
             ColorLook.HASSELBLAD -> "H*"
+            ColorLook.ZEISS -> "Z*"
             ColorLook.VINTAGE -> "VNT"
             ColorLook.RETRO -> "70s"
             ColorLook.CLASSIC -> "CC"
@@ -2126,6 +2522,12 @@ class MainActivity : Activity() {
     private fun colorMatrixFor(look: ColorLook): ColorMatrix? {
         val values = when (look) {
             ColorLook.ORIGINAL -> return null
+            // ZEISS-inspired creative look only; not an official ZEISS calibration or LUT.
+            ColorLook.ZEISS -> floatArrayOf(
+                1.02f, 0.00f, -0.01f, 0f, 1f,
+                0.00f, 1.00f, 0.00f, 0f, 0f,
+                -0.01f, 0.01f, 1.02f, 0f, 1f,
+                0f, 0f, 0f, 1f, 0f)
             // Subtle Hasselblad-inspired natural look, not an official Hasselblad profile.
             ColorLook.HASSELBLAD -> floatArrayOf(
                 1.04f, 0.02f, 0.00f, 0f, 3f,
@@ -2201,7 +2603,7 @@ class MainActivity : Activity() {
             val paint = Paint(Paint.FILTER_BITMAP_FLAG).apply { colorFilter = ColorMatrixColorFilter(matrix) }
             canvas.drawBitmap(source, 0f, 0f, paint)
             ByteArrayOutputStream().use { out ->
-                filtered.compress(Bitmap.CompressFormat.JPEG, 98, out)
+                filtered.compress(Bitmap.CompressFormat.JPEG, if (highQualityJpegEnabled) 100 else 95, out)
                 out.toByteArray()
             }
         } catch (e: Exception) {
@@ -2229,7 +2631,7 @@ class MainActivity : Activity() {
             val top = (source.height - cropHeight) / 2
             cropped = Bitmap.createBitmap(source, left, top, cropWidth, cropHeight)
             return ByteArrayOutputStream().use { out ->
-                cropped.compress(Bitmap.CompressFormat.JPEG, 98, out)
+                cropped.compress(Bitmap.CompressFormat.JPEG, if (highQualityJpegEnabled) 100 else 95, out)
                 out.toByteArray()
             }
         } catch (e: Exception) {
@@ -2315,8 +2717,11 @@ class MainActivity : Activity() {
                 captureButton.background = shutterBackground(false)
             }
             if (::flashButton.isInitialized) {
-                flashButton.text = "ϟ"
-                flashButton.background = roundedBackground(Color.rgb(22, 27, 33), Color.rgb(58, 66, 75), 10)
+                flashButton.text = when (captureFlashMode) { 1 -> "⚡A"; 2 -> "⚡ON"; else -> "⚡" }
+                flashButton.background = roundedBackground(
+                    if (captureFlashMode == 0) Color.rgb(22, 27, 33) else Color.rgb(78, 62, 30),
+                    if (captureFlashMode == 0) Color.rgb(58, 66, 75) else Color.rgb(242, 190, 80), 10
+                )
             }
         }
         try { session?.close() } catch (_: Exception) {}
@@ -2340,10 +2745,20 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        if (hasCameraPermission()) startBackgroundThread()
+        applyImmersiveMode()
+        if (hasCameraPermission()) {
+            startBackgroundThread()
+            // When returning from the system photo picker, TextureView often remains available
+            // and does not fire onSurfaceTextureAvailable again. Reopen the camera explicitly.
+            if (::preview.isInitialized && preview.isAvailable && cameraDevice == null) {
+                activeCameraId?.let { openCamera(it) }
+            }
+        }
     }
 
     override fun onPause() {
+        // Camera callbacks may arrive while the activity is losing focus; invalidate and close
+        // the session before shutting down its handler thread.
         closeCamera()
         stopBackgroundThread()
         super.onPause()
